@@ -4,6 +4,9 @@ import { z } from "zod";
 import type { AppDatabase } from "./db.js";
 import { systemClock, type Clock, type TransferProvider } from "./types.js";
 
+const MINOR_FACTOR = 100; //I am assuming a currency like naira or usd, in prod would use a map of supported currencies and the minor multiples
+const TOPIC = "payment.created"; //I would publish to an outbox and have the provider call happen in the background
+
 const transferInput = z.object({
   debitAccountId: z.string().min(1),
   destinationAccount: z.string().regex(/^\d{10}$/),
@@ -36,7 +39,7 @@ function asPublicTransfer(row: Record<string, unknown>) {
     id: row.id,
     debitAccountId: row.debit_account_id,
     destinationAccount: row.destination_account,
-    amount: row.amount,
+    amountCent: row.amount_cent,
     status: row.status,
     providerReference: row.provider_reference,
     failureReason: row.failure_reason,
@@ -52,7 +55,11 @@ export function createApp({
   clock = systemClock,
 }: AppOptions) {
   const app = express();
-  app.use(express.json({ verify: (req, _res, buf) => ((req as Request & { rawBody?: Buffer }).rawBody = buf) }));
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => ((req as Request & { rawBody?: Buffer }).rawBody = buf),
+    }),
+  );
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -65,8 +72,14 @@ export function createApp({
   app.get("/api/transfers", authenticate, (req: DemoRequest, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     const rows = status
-      ? db.prepare("SELECT * FROM transfers WHERE owner_id = ? AND status = ? ORDER BY created_at DESC").all(req.demoUser!, status)
-      : db.prepare("SELECT * FROM transfers WHERE owner_id = ? ORDER BY created_at DESC").all(req.demoUser!);
+      ? db
+          .prepare(
+            "SELECT * FROM transfers WHERE owner_id = ? AND status = ? ORDER BY created_at DESC",
+          )
+          .all(req.demoUser!, status)
+      : db
+          .prepare("SELECT * FROM transfers WHERE owner_id = ? ORDER BY created_at DESC")
+          .all(req.demoUser!);
     res.json(rows.map((row) => asPublicTransfer(row as Record<string, unknown>)));
   });
 
@@ -79,64 +92,75 @@ export function createApp({
 
     const input = parsed.data;
     const idempotencyKey = req.header("idempotency-key") ?? null;
-    const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(input.debitAccountId) as
-      | Record<string, unknown>
-      | undefined;
+    const userid = req.demoUser;
+    const amountMinor = input.amount * MINOR_FACTOR;
 
-    if (!account) {
-      res.status(404).json({ error: "account not found" });
-      return;
-    }
-    if (Number(account.balance) < input.amount) {
-      res.status(422).json({ error: "insufficient funds" });
-      return;
-    }
+    db.exec("BEGIN IMMEDIATE");
 
-    // Deliberately unsafe: check-then-act, optional key, provider called before reservation,
-    // no ownership check, and unrelated DB writes are not atomic.
-    if (idempotencyKey) {
-      const existing = db.prepare("SELECT * FROM transfers WHERE owner_id = ? AND idempotency_key = ?").get(req.demoUser!, idempotencyKey);
-      if (existing) {
-        res.json(asPublicTransfer(existing as Record<string, unknown>));
-        return;
-      }
-    }
-
-    const id = crypto.randomUUID();
+    const paymentid = crypto.randomUUID();
+    const outboxid = crypto.randomUUID();
     const now = clock.now().toISOString();
 
     try {
-      const providerResult = await provider.send({
-        clientReference: id,
-        destinationAccount: input.destinationAccount,
-        amount: input.amount,
-      });
-      const status = providerResult.status === "accepted" ? "succeeded" : "failed";
-
-      if (status === "succeeded") {
-        db.prepare("UPDATE accounts SET balance = balance - ? WHERE id = ?").run(input.amount, input.debitAccountId);
-      }
-      db.prepare(`
+      const payment = db
+        .prepare(
+          `
         INSERT INTO transfers
           (id, owner_id, debit_account_id, destination_account, amount, status,
            idempotency_key, provider_reference, failure_reason, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        id,
-        req.demoUser!,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+      `,
+        )
+        .get(
+          paymentid,
+          req.demoUser!,
+          input.debitAccountId,
+          input.destinationAccount,
+          amountMinor,
+          "pending",
+          idempotencyKey,
+          null,
+          null,
+          now,
+          now,
+        ) as Record<string, unknown> | undefined;
+
+      const account = db
+        .prepare("SELECT * FROM accounts WHERE id = ?")
+        .get(input.debitAccountId) as Record<string, unknown> | undefined;
+
+      if (!account) {
+        res.status(404).json({ error: "account not found" });
+        return;
+      }
+
+      if (account.ownerid != userid) {
+        res.status(403).json({ error: "resource forbidden" });
+      }
+
+      if (Number(account.balance) < input.amount) {
+        res.status(422).json({ error: "insufficient funds" });
+        return;
+      }
+
+      db.prepare("UPDATE accounts SET balance_minor = balance_minor - ? WHERE id = ?").run(
+        amountMinor,
         input.debitAccountId,
-        input.destinationAccount,
-        input.amount,
-        status,
-        idempotencyKey,
-        providerResult.providerReference,
-        status === "failed" ? "provider rejected" : null,
-        now,
-        now,
       );
-      const row = db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Record<string, unknown>;
-      res.status(201).json(asPublicTransfer(row));
+
+      db.prepare(
+        `
+        INSERT INTO outbox (id, payment_id, payload, topic) VALUES (?, ?, ?, ?)
+        `,
+      ).run(outboxid, paymentid, JSON.stringify(payment), TOPIC);
+
+      //commit the transaction (I would want an outbox table to write to for background processing)
+
+      db.exec('COMMIT')
+
+      res.status(201).json(asPublicTransfer(payment));
     } catch (error) {
+      //check for the error returned on violation of the idempotency_key check and read the table for the existing transfer
       // Deliberately unsafe: accepted-but-timeout is reported as an ordinary failure and not persisted.
       res.status(502).json({ error: error instanceof Error ? error.message : "provider error" });
     }
@@ -159,7 +183,9 @@ export function createApp({
 
   app.post("/api/admin/reconcile", authenticate, async (req: DemoRequest, res) => {
     // TODO: restrict to ops-admin and make concurrent workers safe.
-    const rows = db.prepare("SELECT * FROM transfers WHERE status IN ('pending', 'uncertain')").all() as Record<string, unknown>[];
+    const rows = db
+      .prepare("SELECT * FROM transfers WHERE status IN ('pending', 'uncertain')")
+      .all() as Record<string, unknown>[];
     let processed = 0;
     for (const row of rows) {
       if (!row.provider_reference) continue;
