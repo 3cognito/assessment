@@ -1,13 +1,15 @@
-
 # Payload validation
 
 I modified the db schema to use `balance_minor` and `amount_minor`, added a positive integer check in the zod schema
- - to ensure amounts are positive and whole, consistent with how minor units are represented
+
+- to ensure amounts are positive and whole, consistent with how minor units are represented
 
 # Idempotency key handling
+
 I let the db enforce transfer idempotency with a unique index on `(owner_id, idempotency_key)` and read the value on that failure
- - prevents race during read and write (2 requests could read inexistent state and have access to insert)
- - removes one db call on the likely path as more requests will probably be fresh (unique idempotency key)
+
+- prevents race during read and write (2 requests could read inexistent state and have access to insert)
+- removes one db call on the likely path as more requests will probably be fresh (unique idempotency key)
 
 If the stored request hash matches the new request hash, I return the original transfer, otherwise I return `409` (like the readme specified).
 
@@ -16,10 +18,11 @@ If the stored request hash matches the new request hash, I return the original t
 I verify that the authenticated user owns the debit account before committing the transfer.
 I create the transfer, acct debit and outbox table inside one trx, commit on success and rollback on failure
 I use an `outbox` table so provider calls can be made durable and also handled in the background in a non blocking manner
- - It also gives more control over how transaction state is managed
-I read the account info in a trx started with `BEGIN IMMEDIATE` (would do something like `for update` in pg)
- - ensures two requests do not read the same balance where there should not, leading to a race
-I use the publicfacing mapper to return only needed account fields so senstive info is not returned like bvn 
+
+- It also gives more control over how transaction state is managed
+  I read the account info in a trx started with `BEGIN IMMEDIATE` (would do something like `for update` in pg)
+- ensures two requests do not read the same balance where there should not, leading to a race
+  I use the publicfacing mapper to return only needed account fields so senstive info is not returned like bvn
 
 # Admin actions
 
@@ -35,4 +38,25 @@ I only apply provider webhook updates when the current transfer state allows the
 - only transient (pending or uncertain) states can move to terminal (succeed or failed) and not vice versa
   I added other fields to the webhook table for audit and correctness
 - why it was ignored, when it was applied, the status it carried (would store full payload in a full fledged case)
+
+# worker
+
+The worker claims an outbox row before calling the provider
+ - uses the transfer id as the provider client reference, and then records the provider result.
+ok provider response remain in `pending`, rejected response become `failed`, and provider errors/timeouts become `uncertain`.
+
+# Reversals
+
+I added a `reversals` table with a unique constraint on `transfer_id` to ensure transactions can be reversed only once
+ - this prevents double reversals from any possible reversal path
+Any place or path that needs to return money creates a reversal, then credits the account and marks the transfer `reversed`
+ - all done within a transaction
+ - I also added this to protect reconciliation two concurrent requests cannot create two reversals for the same transfer
+
+# Reconciliation
+
+I only allow reconciliation for uncertain transfers.
+If the provider still reports `pending`, I leave the transfer as `uncertain`.
+If the provider reports `succeeded`, I mark the transfer `succeeded`.
+If the provider reports `failed`, I use the reversal path so the debit is returned exactly once.
 
