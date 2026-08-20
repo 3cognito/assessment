@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import type { AppDatabase } from "./db.js";
+import { isUniqueConstraintError, reverseTransfer } from "./reversal.js";
 import { systemClock, type Clock, type TransferProvider } from "./types.js";
 import { hash } from "./util.js";
 
@@ -78,10 +79,6 @@ function asPublicAccount(row: Record<string, unknown>) {
     name: row.name,
     balance: row.balance_minor,
   };
-}
-
-function isUniqueConstraintError(error: unknown) {
-  return error instanceof Error && error.message.includes("UNIQUE constraint failed");
 }
 
 function hasValidProviderSignature(req: Request, secret: string) {
@@ -312,11 +309,15 @@ export function createApp({
         return;
       }
 
-      db.prepare("UPDATE transfers SET status = ?, updated_at = ? WHERE id = ?").run(
-        event.status,
-        now,
-        event.transferId,
-      );
+      if (event.status === "failed") {
+        reverseTransfer(db, transfer, now, "provider webhook failed");
+      } else {
+        db.prepare("UPDATE transfers SET status = ?, updated_at = ? WHERE id = ?").run(
+          event.status,
+          now,
+          event.transferId,
+        );
+      }
 
       db.prepare("UPDATE webhook_events SET applied_at = ? WHERE event_id = ?").run(
         now,

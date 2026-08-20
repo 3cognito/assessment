@@ -53,6 +53,15 @@ export function createDatabase(filename = ":memory:"): AppDatabase {
       processed_at TEXT,
       last_error TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS reversals (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT NOT NULL UNIQUE REFERENCES transfers(id),
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
   return db;
 }

@@ -1,4 +1,5 @@
 import type { AppDatabase } from "./db.js";
+import { reverseTransfer } from "./reversal.js";
 import { systemClock, type Clock, type TransferProvider } from "./types.js";
 
 interface ClaimedOutboxRow {
@@ -72,28 +73,41 @@ export async function process(
     });
 
     const now = clock.now().toISOString();
-    let status = "";
-    if (providerResult.status === "accepted") {
-      status = "pending";
-    } else {
-      status = "failed";
-    }
 
     db.exec("BEGIN IMMEDIATE");
     try {
-      db.prepare(
-        `
-        UPDATE transfers
-        SET status = ?, provider_reference = ?, failure_reason = ?, updated_at = ?
-        WHERE id = ?
-      `,
-      ).run(
-        status,
-        providerResult.providerReference,
-        providerResult.status === "rejected" ? "provider rejected" : null,
-        now,
-        record.transfer_id,
-      );
+      const transfer = db.prepare("SELECT * FROM transfers WHERE id = ?").get(record.transfer_id) as
+        | Record<string, unknown>
+        | undefined;
+
+      if (!transfer) {
+        throw new Error("transfer not found for outbox record");
+      }
+
+      if (providerResult.status === "rejected") {
+        db.prepare(
+          `
+          UPDATE transfers
+          SET provider_reference = ?, updated_at = ?
+          WHERE id = ?
+        `,
+        ).run(providerResult.providerReference, now, record.transfer_id);
+
+        reverseTransfer(
+          db,
+          { ...transfer, provider_reference: providerResult.providerReference },
+          now,
+          "provider rejected",
+        );
+      } else {
+        db.prepare(
+          `
+          UPDATE transfers
+          SET status = ?, provider_reference = ?, failure_reason = ?, updated_at = ?
+          WHERE id = ?
+        `,
+        ).run("pending", providerResult.providerReference, null, now, record.transfer_id);
+      }
 
       db.prepare(
         `
