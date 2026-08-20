@@ -25,4 +25,14 @@ I use the publicfacing mapper to return only needed account fields so senstive i
 
 I restrict reconcile to `ops-admin` (per the readme) because it should only be accessible by admins.
 
+# Webhooks
+
+I verify provider webhooks with `x-provider-signature`, using a sha256 of the raw JSON body and webhook secret.
+If the same event id is received again (checked by event id), I return success without applying the transfer update again.
+I only apply provider webhook updates when the current transfer state allows the transition.
+
+- I use a simple map and helper to validate valid transitions
+- only transient (pending or uncertain) states can move to terminal (succeed or failed) and not vice versa
+  I added other fields to the webhook table for audit and correctness
+- why it was ignored, when it was applied, the status it carried (would store full payload in a full fledged case)
 

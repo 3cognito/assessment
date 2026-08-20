@@ -13,6 +13,19 @@ const transferInput = z.object({
   amount: z.number().int().positive(),
 });
 
+const webhookInput = z.object({
+  eventId: z.string().min(1),
+  transferId: z.string().min(1),
+  status: z.enum(["succeeded", "failed"]),
+});
+
+type WebhookTransferStatus = "succeeded" | "failed"
+
+const allowedWebhookTransitions: Record<string, WebhookTransferStatus[]> = {
+  pending: ["succeeded", "failed"],
+  uncertain: ["succeeded", "failed"],
+};
+
 interface AppOptions {
   db: AppDatabase;
   provider: TransferProvider;
@@ -22,6 +35,17 @@ interface AppOptions {
 
 interface DemoRequest extends Request {
   demoUser?: string;
+}
+
+function canApplyWebhookTransition(currentStatus: unknown, nextStatus: WebhookTransferStatus) {
+  const currentStatusKey = String(currentStatus);
+  const allowedNextStatuses = allowedWebhookTransitions[currentStatusKey];
+
+  if (!allowedNextStatuses) {
+    return false;
+  }
+
+  return allowedNextStatuses.includes(nextStatus);
 }
 
 function authenticate(req: DemoRequest, res: Response, next: NextFunction): void {
@@ -60,6 +84,23 @@ function asPublicAccount(row: Record<string, unknown>) {
 
 function isUniqueConstraintError(error: unknown) {
   return error instanceof Error && error.message.includes("UNIQUE constraint failed");
+}
+
+function hasValidProviderSignature(req: Request, secret: string) {
+  const signature = req.header("x-provider-signature");
+  const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+
+  if (!signature || !rawBody) {
+    return false;
+  }
+
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+
+  if (signature.length !== expected.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
 }
 
 export function createApp({
@@ -215,18 +256,82 @@ export function createApp({
   });
 
   app.post("/api/provider/webhook", (req, res) => {
-    // TODO: the candidate must authenticate and deduplicate callbacks.
-    const body = req.body as { eventId?: string; transferId?: string; status?: string };
-    if (!body.transferId || !body.status) {
+    if (!hasValidProviderSignature(req, webhookSecret)) {
+      res.status(401).json({ error: "invalid provider signature" });
+      return;
+    }
+
+    const parsed = webhookInput.safeParse(req.body);
+    if (!parsed.success) {
       res.status(400).json({ error: "invalid event" });
       return;
     }
-    db.prepare("UPDATE transfers SET status = ?, updated_at = ? WHERE id = ?").run(
-      body.status,
-      clock.now().toISOString(),
-      body.transferId,
-    );
-    res.json({ received: true, configuredSecretLength: webhookSecret.length });
+
+    const event = parsed.data;
+    const now = clock.now().toISOString();
+
+    try {
+      db.exec("BEGIN IMMEDIATE");
+
+      try {
+        db.prepare(
+          `
+          INSERT INTO webhook_events
+            (event_id, transfer_id, status, received_at)
+          VALUES (?, ?, ?, ?)
+        `,
+        ).run(event.eventId, event.transferId, event.status, now);
+      } catch (error) {
+        if (isUniqueConstraintError(error)) {
+          db.exec("ROLLBACK");
+          res.json({ received: true, duplicate: true });
+          return;
+        }
+
+        throw error;
+      }
+
+      const transfer = db.prepare("SELECT * FROM transfers WHERE id = ?").get(event.transferId) as
+        | Record<string, unknown>
+        | undefined;
+
+      if (!transfer) {
+        db.prepare("UPDATE webhook_events SET ignored_reason = ? WHERE event_id = ?").run(
+          "transfer not found",
+          event.eventId,
+        );
+        db.exec("COMMIT");
+        res.json({ received: true, ignored: true });
+        return;
+      }
+
+      if (!canApplyWebhookTransition(transfer.status, event.status)) {
+        db.prepare("UPDATE webhook_events SET ignored_reason = ? WHERE event_id = ?").run(
+          `invalid transition from ${String(transfer.status)} to ${event.status}`,
+          event.eventId,
+        );
+        db.exec("COMMIT");
+        res.json({ received: true, ignored: true });
+        return;
+      }
+
+      db.prepare("UPDATE transfers SET status = ?, updated_at = ? WHERE id = ?").run(
+        event.status,
+        now,
+        event.transferId,
+      );
+
+      db.prepare("UPDATE webhook_events SET applied_at = ? WHERE event_id = ?").run(
+        now,
+        event.eventId,
+      );
+
+      db.exec("COMMIT");
+      res.json({ received: true });
+    } catch (error) {
+      db.exec("ROLLBACK");
+      res.status(500).json({ error: error instanceof Error ? error.message : "internal error" });
+    }
   });
 
   app.post("/api/admin/reconcile", authenticate, async (req: DemoRequest, res) => {

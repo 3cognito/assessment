@@ -39,7 +39,11 @@ export function createDatabase(filename = ":memory:"): AppDatabase {
 
     CREATE TABLE IF NOT EXISTS webhook_events (
       event_id TEXT PRIMARY KEY,
-      received_at TEXT NOT NULL
+      transfer_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      received_at TEXT NOT NULL,
+      applied_at TEXT,
+      ignored_reason TEXT
     );
 
     CREATE TABLE IF NOT EXISTS outbox (
