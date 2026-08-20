@@ -76,3 +76,8 @@ If the provider reports `failed`, I use the reversal path so the debit is return
 # AI USE
 
 I used AI to understand the db driver syntax and to convert rough db models to correct syntax and write tests (which i reviewed)
+The client side update was also done by AI
+
+# Client limitations
+
+The transfer states on the client will remain pending since webhooks are not processed unless a local trigger is done
