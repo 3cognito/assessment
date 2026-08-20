@@ -2,10 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export type AppDatabase = DatabaseSync;
 
-/*I canNot write a comment in the db.exec statement but I would like to note that I would
-rather have the unique index on idemp_key, debit_acct_id (that is what comes to my mind first) but readme says user + key
-I think either way is fine
-*/
+
 export function createDatabase(filename = ":memory:"): AppDatabase {
   const db = new DatabaseSync(filename);
   db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -18,6 +15,9 @@ export function createDatabase(filename = ":memory:"): AppDatabase {
       provider_token TEXT NOT NULL,
       bvn TEXT NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_accounts_owner_id
+      ON accounts (owner_id);
 
     CREATE TABLE IF NOT EXISTS transfers (
       id TEXT PRIMARY KEY,
@@ -53,6 +53,9 @@ export function createDatabase(filename = ":memory:"): AppDatabase {
       processed_at TEXT,
       last_error TEXT
     );
+
+    CREATE INDEX IF NOT EXISTS idx_outbox_pending
+      ON outbox (processed_at, claimed_at, id);
 
     CREATE TABLE IF NOT EXISTS reversals (
       id TEXT PRIMARY KEY,
