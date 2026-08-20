@@ -1,9 +1,11 @@
- //I need to verify account ownership - this prevents a request coming in from someone who does not own the account
-//what happens if I have multiple requests attempting to modify this user's balance? - acquire a lock when getting the account - this would prevent concurrent requests from seeing the same balance when they should not
-//I would attempt to insert the transfer first and let the db fail on a unique constraint on the idempotency key (do i add this?) - this would ensure the idempotency check is actually useful, current model would allow duplicate writes where two requests race
-//provider should not be called before any records are stored - a successful request on the provider side without corresponding db records will lead to significant inconsistencies
-//inserts should be done in a transaction to preserve atomicity
+MAIN ISSUES I FOUND
 
-
-
-//I would typically not store bvn on the account table
+1. Only the owner of a debit account should be able to initiate a transfer from it.
+2. A transfer request should only cause at most one local debit.
+3. A transfer request should only cause at most one provider instruction to be executed
+4. Amounts are already in the minor units (from the README.md) so no need to convert anymore (I will change syntax to reflect that)
+5. A provider timeout after acceptance is not a failure. It is an uncertainty that must be reconciled.
+6. It should not be possible to move a succeeded, failed, or reversed transfer back to pending or uncertain.
+7. If reversal needs to happen, it should happen only once per transfer.
+8. Only verified admins should be able to carry out admin actions.
+9. The responses from the API should not expose sensitive data.
