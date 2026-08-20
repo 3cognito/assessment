@@ -58,11 +58,8 @@ function asPublicAccount(row: Record<string, unknown>) {
   };
 }
 
-function isConstraintError(error: unknown) {
-  return (
-    error instanceof Error &&
-    ("errcode" in error || error.message.includes("constraint") || error.message.includes("UNIQUE"))
-  );
+function isUniqueConstraintError(error: unknown) {
+  return error instanceof Error && error.message.includes("UNIQUE constraint failed");
 }
 
 export function createApp({
@@ -128,6 +125,22 @@ export function createApp({
 
     try {
       db.exec("BEGIN IMMEDIATE");
+
+      const account = db
+        .prepare("SELECT * FROM accounts WHERE id = ?")
+        .get(input.debitAccountId) as Record<string, unknown> | undefined;
+
+      if (!account) {
+        db.exec("ROLLBACK");
+        res.status(404).json({ error: "account not found" });
+        return;
+      }
+
+      if (account.owner_id !== userid) {
+        db.exec("ROLLBACK");
+        res.status(403).json({ error: "resource forbidden" });
+        return;
+      }
 
       const payment = db
         .prepare(
@@ -197,7 +210,7 @@ export function createApp({
     } catch (error) {
       db.exec("ROLLBACK");
 
-      if (isConstraintError(error)) {
+      if (isUniqueConstraintError(error)) {
         const existing = db
           .prepare("SELECT * FROM transfers WHERE owner_id = ? AND idempotency_key = ?")
           .get(userid, idempotencyKey) as Record<string, unknown> | undefined;
@@ -213,8 +226,7 @@ export function createApp({
         }
       }
 
-      // Deliberately unsafe: accepted-but-timeout is reported as an ordinary failure and not persisted.
-      res.status(502).json({ error: error instanceof Error ? error.message : "provider error" });
+      res.status(500).json({ error: error instanceof Error ? error.message : "transfer error" });
     }
   });
 
@@ -234,7 +246,12 @@ export function createApp({
   });
 
   app.post("/api/admin/reconcile", authenticate, async (req: DemoRequest, res) => {
-    // TODO: restrict to ops-admin and make concurrent workers safe.
+    if (req.demoUser !== "ops-admin") {
+      res.status(403).json({ error: "resource forbidden" });
+      return;
+    }
+
+    // TODO: make concurrent workers safe.
     const rows = db
       .prepare("SELECT * FROM transfers WHERE status IN ('pending', 'uncertain')")
       .all() as Record<string, unknown>[];
