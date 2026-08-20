@@ -338,27 +338,50 @@ export function createApp({
       return;
     }
 
-    // TODO: make concurrent workers safe.
     const rows = db
-      .prepare("SELECT * FROM transfers WHERE status IN ('pending', 'uncertain')")
-      .all() as Record<string, unknown>[];
+      .prepare("SELECT * FROM transfers WHERE status = ?")
+      .all("uncertain") as Record<string, unknown>[];
+
     let processed = 0;
     for (const row of rows) {
       if (!row.provider_reference) continue;
+
       const result = await provider.getStatus(String(row.provider_reference));
-      if (result.status === "failed") {
-        db.prepare("UPDATE accounts SET balance_minor = balance_minor + ? WHERE id = ?").run(
-          Number(row.amount_minor),
-          String(row.debit_account_id),
-        );
+      const now = clock.now().toISOString();
+
+      if (result.status === "pending") {
+        continue;
       }
-      db.prepare("UPDATE transfers SET status = ?, updated_at = ? WHERE id = ?").run(
-        result.status,
-        clock.now().toISOString(),
-        String(row.id),
-      );
-      processed += 1;
+
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = db.prepare("SELECT * FROM transfers WHERE id = ?").get(String(row.id)) as
+          | Record<string, unknown>
+          | undefined;
+
+        if (!current || current.status !== "uncertain") {
+          db.exec("COMMIT");
+          continue;
+        }
+
+        if (result.status === "failed") {
+          reverseTransfer(db, current, now, "provider reconciliation failed");
+        } else {
+          db.prepare("UPDATE transfers SET status = ?, updated_at = ? WHERE id = ?").run(
+            "succeeded",
+            now,
+            String(row.id),
+          );
+        }
+
+        db.exec("COMMIT");
+        processed += 1;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     }
+
     res.json({ processed });
   });
 
