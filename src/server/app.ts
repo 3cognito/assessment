@@ -58,6 +58,13 @@ function asPublicAccount(row: Record<string, unknown>) {
   };
 }
 
+function isConstraintError(error: unknown) {
+  return (
+    error instanceof Error &&
+    ("errcode" in error || error.message.includes("constraint") || error.message.includes("UNIQUE"))
+  );
+}
+
 export function createApp({
   db,
   provider,
@@ -108,7 +115,7 @@ export function createApp({
       return;
     }
 
-    const userid = req.demoUser;
+    const userid = req.demoUser!;
     const requestHash = hash({
       debitAccountId: input.debitAccountId,
       destinationAccount: input.destinationAccount,
@@ -121,28 +128,6 @@ export function createApp({
 
     try {
       db.exec("BEGIN IMMEDIATE");
-
-      const account = db
-        .prepare("SELECT * FROM accounts WHERE id = ?")
-        .get(input.debitAccountId) as Record<string, unknown> | undefined;
-
-      if (!account) {
-        db.exec("ROLLBACK");
-        res.status(404).json({ error: "account not found" });
-        return;
-      }
-
-      if (account.owner_id !== userid) {
-        db.exec("ROLLBACK");
-        res.status(403).json({ error: "resource forbidden" });
-        return;
-      }
-
-      if (Number(account.balance_minor) < input.amount) {
-        db.exec("ROLLBACK");
-        res.status(422).json({ error: "insufficient funds" });
-        return;
-      }
 
       const payment = db
         .prepare(
@@ -172,6 +157,28 @@ export function createApp({
         throw new Error("transfer insert did not return a row");
       }
 
+      const account = db
+        .prepare("SELECT * FROM accounts WHERE id = ?")
+        .get(input.debitAccountId) as Record<string, unknown> | undefined;
+
+      if (!account) {
+        db.exec("ROLLBACK");
+        res.status(404).json({ error: "account not found" });
+        return;
+      }
+
+      if (account.owner_id !== userid) {
+        db.exec("ROLLBACK");
+        res.status(403).json({ error: "resource forbidden" });
+        return;
+      }
+
+      if (Number(account.balance_minor) < input.amount) {
+        db.exec("ROLLBACK");
+        res.status(422).json({ error: "insufficient funds" });
+        return;
+      }
+
       db.prepare("UPDATE accounts SET balance_minor = balance_minor - ? WHERE id = ?").run(
         input.amount,
         input.debitAccountId,
@@ -190,7 +197,22 @@ export function createApp({
     } catch (error) {
       db.exec("ROLLBACK");
 
-      //check for the error returned on violation of the idempotency_key check and read the table for the existing transfer
+      if (isConstraintError(error)) {
+        const existing = db
+          .prepare("SELECT * FROM transfers WHERE owner_id = ? AND idempotency_key = ?")
+          .get(userid, idempotencyKey) as Record<string, unknown> | undefined;
+
+        if (existing) {
+          if (existing.fingerprint !== requestHash) {
+            res.status(409).json({ error: "Idempotency key was reused with a different request" });
+            return;
+          }
+
+          res.status(200).json(asPublicTransfer(existing));
+          return;
+        }
+      }
+
       // Deliberately unsafe: accepted-but-timeout is reported as an ordinary failure and not persisted.
       res.status(502).json({ error: error instanceof Error ? error.message : "provider error" });
     }

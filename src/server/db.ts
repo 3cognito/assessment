@@ -34,8 +34,8 @@ export function createDatabase(filename = ":memory:"): AppDatabase {
       updated_at TEXT NOT NULL
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_idempotency_key_debit_account
-      ON transfers (idempotency_key, owner_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_transfers_owner_idempotency_key
+      ON transfers (owner_id, idempotency_key);
 
     CREATE TABLE IF NOT EXISTS webhook_events (
       event_id TEXT PRIMARY KEY,
