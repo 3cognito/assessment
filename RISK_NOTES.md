@@ -1,4 +1,4 @@
-MAIN ISSUES I FOUND
+MAIN ISSUES
 
 1. Only the owner of a debit account should be able to initiate a transfer from it.
     risk: if ownership is not checked this can allow a bad actor move money from an account that is not theirs
