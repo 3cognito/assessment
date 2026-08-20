@@ -5,8 +5,6 @@ import type { AppDatabase } from "./db.js";
 import { systemClock, type Clock, type TransferProvider } from "./types.js";
 import { hash } from "./util.js";
 
-const TOPIC = "payment.created"; //I would save to an outbox table and have the provider call happen in the background
-
 const transferInput = z.object({
   debitAccountId: z.string().min(1),
   destinationAccount: z.string().regex(/^\d{10}$/),
@@ -222,12 +220,11 @@ export function createApp({
         input.debitAccountId,
       );
 
-      // (I am writing to an outbox table for consistency and to give more control over state management)
       db.prepare(
         `
-        INSERT INTO outbox (id, transfer_id, payload, topic) VALUES (?, ?, ?, ?)
+        INSERT INTO outbox (id, transfer_id) VALUES (?, ?)
         `,
-      ).run(outboxid, paymentid, JSON.stringify(payment), TOPIC);
+      ).run(outboxid, paymentid);
 
       db.exec("COMMIT");
 

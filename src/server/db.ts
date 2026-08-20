@@ -48,10 +48,10 @@ export function createDatabase(filename = ":memory:"): AppDatabase {
 
     CREATE TABLE IF NOT EXISTS outbox (
       id TEXT PRIMARY KEY,
-      transfer_id TEXT NOT NULL REFERENCES transfers(id),
-      payload TEXT NOT NULL,
+      transfer_id TEXT NOT NULL UNIQUE REFERENCES transfers(id),
+      claimed_at TEXT,
       processed_at TEXT,
-      topic TEXT NOT NULL
+      last_error TEXT
     );
   `);
   return db;
