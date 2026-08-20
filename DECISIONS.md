@@ -1,3 +1,17 @@
+# How I approached this
+
+1. First assessed the risks 
+   - assessed the risks and I documented them in a draft format in risk_notes.md (later expanded)
+   - I probably should have spent more time on the call auditing
+
+2. Scoped out the needed work
+   - the commits will show the steps and order used. 
+
+3. Implemented fixes in a defined manner and tested as I went
+   - I also documented decisions below: 
+
+
+
 # Payload validation
 
 I modified the db schema to use `balance_minor` and `amount_minor`, added a positive integer check in the zod schema
