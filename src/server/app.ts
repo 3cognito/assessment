@@ -170,22 +170,6 @@ export function createApp({
         throw new Error("transfer insert did not return a row");
       }
 
-      const account = db
-        .prepare("SELECT * FROM accounts WHERE id = ?")
-        .get(input.debitAccountId) as Record<string, unknown> | undefined;
-
-      if (!account) {
-        db.exec("ROLLBACK");
-        res.status(404).json({ error: "account not found" });
-        return;
-      }
-
-      if (account.owner_id !== userid) {
-        db.exec("ROLLBACK");
-        res.status(403).json({ error: "resource forbidden" });
-        return;
-      }
-
       if (Number(account.balance_minor) < input.amount) {
         db.exec("ROLLBACK");
         res.status(422).json({ error: "insufficient funds" });
@@ -197,7 +181,7 @@ export function createApp({
         input.debitAccountId,
       );
 
-     // (I am writing to an outbox table for consistency and to give more control over state management)
+      // (I am writing to an outbox table for consistency and to give more control over state management)
       db.prepare(
         `
         INSERT INTO outbox (id, transfer_id, payload, topic) VALUES (?, ?, ?, ?)
